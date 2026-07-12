@@ -38,21 +38,25 @@ fn find_mapping_file() -> PathBuf {
         .expect("Falha ao obter diretório do executável")
         .to_path_buf();
     
+    // 1. Procura no mesmo diretório do executável
     let mapping_in_exe_dir = exe_dir.join("mapeamento.toml");
     if mapping_in_exe_dir.exists() {
         return mapping_in_exe_dir;
     }
 
-    let project_dir = exe_dir
-        .parent().and_then(|p| p.parent()).and_then(|p| p.parent());
+    // 2. Procura um nível acima (ex: se executável estiver em bin/)
+    if let Some(p) = exe_dir.parent() {
+        let path = p.join("mapeamento.toml");
+        if path.exists() { return path; }
+    }
     
-    if let Some(project_dir) = project_dir {
-        let mapping_in_project = project_dir.join("mapeamento.toml");
-        if mapping_in_project.exists() {
-            return mapping_in_project;
-        }
+    // 3. Procura dois níveis acima (ex: target/release/)
+    if let Some(p) = exe_dir.parent().and_then(|p| p.parent()) {
+        let path = p.join("mapeamento.toml");
+        if path.exists() { return path; }
     }
 
+    // Retorna o caminho padrão caso não encontre para mostrar o erro ou fallback
     exe_dir.join("mapeamento.toml")
 }
 
@@ -280,6 +284,29 @@ fn find_all_python_files(dir: &Path) -> Vec<PathBuf> {
     python_files
 }
 
+fn find_entry_points(dir: &Path) -> Vec<PathBuf> {
+    let python_files = find_all_python_files(dir);
+    let mut entry_points = Vec::new();
+    
+    let main_regex = Regex::new(r#"__name__\s*==\s*['"]__main__['"]"#).expect("Invalid regex");
+    
+    for file in python_files {
+        let file_name = file.file_name().unwrap_or_default().to_string_lossy();
+        if file_name == "main.py" || file_name == "app.py" || file_name == "run.py" {
+            entry_points.push(file.clone());
+            continue;
+        }
+        
+        if let Ok(content) = fs::read_to_string(&file) {
+            if main_regex.is_match(&content) {
+                entry_points.push(file);
+            }
+        }
+    }
+    
+    entry_points
+}
+
 fn extract_libraries_from_directory(dir: &Path, mapping: &HashMap<String, String>) -> Vec<String> {
     println!("Searching for Python files in directory: {}", dir.display());
     
@@ -433,5 +460,49 @@ fn main() {
     if target_path.is_file() {
         println!("\nTo run your script:");
         println!("    python {}", target_path.display());
+        
+        if cfg!(windows) {
+            let file_name = target_path.file_stem().and_then(|s| s.to_str()).unwrap_or("script");
+            let bat_name = format!("run_{}.bat", file_name);
+            let bat_path = env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&bat_name);
+            
+            let target_file = target_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+            
+            let bat_content = format!(
+                "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython {}\r\npause\r\n",
+                venv_name, target_file
+            );
+            
+            if let Err(e) = fs::write(&bat_path, bat_content) {
+                eprintln!("Warning: Failed to create {}: {}", bat_name, e);
+            } else {
+                println!("    (Or simply run '{}')", bat_name);
+            }
+        }
+    } else if target_path.is_dir() {
+        if cfg!(windows) {
+            let entry_points = find_entry_points(&target_path);
+            if !entry_points.is_empty() {
+                println!("\nFound {} entry point(s). Creating .bat files...", entry_points.len());
+                for ep in entry_points {
+                    let file_name = ep.file_stem().and_then(|s| s.to_str()).unwrap_or("script");
+                    let bat_name = format!("run_{}.bat", file_name);
+                    let bat_path = env::current_dir().unwrap_or_else(|_| PathBuf::from(".")).join(&bat_name);
+                    
+                    let target_file = ep.display();
+                    
+                    let bat_content = format!(
+                        "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython {}\r\npause\r\n",
+                        venv_name, target_file
+                    );
+                    
+                    if let Err(e) = fs::write(&bat_path, bat_content) {
+                        eprintln!("Warning: Failed to create {}: {}", bat_name, e);
+                    } else {
+                        println!("    Created '{}' to run {}", bat_name, target_file);
+                    }
+                }
+            }
+        }
     }
 }
