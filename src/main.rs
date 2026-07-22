@@ -290,18 +290,33 @@ fn find_entry_points(dir: &Path) -> Vec<PathBuf> {
     
     let main_regex = Regex::new(r#"__name__\s*==\s*['"]__main__['"]"#).expect("Invalid regex");
     
-    for file in python_files {
+    for file in &python_files {
         let file_name = file.file_name().unwrap_or_default().to_string_lossy();
         if file_name == "main.py" || file_name == "app.py" || file_name == "run.py" {
             entry_points.push(file.clone());
             continue;
         }
         
-        if let Ok(content) = fs::read_to_string(&file) {
+        if let Ok(content) = fs::read_to_string(file) {
             if main_regex.is_match(&content) {
-                entry_points.push(file);
+                entry_points.push(file.clone());
             }
         }
+    }
+    
+    // Se não encontrou nenhum entry point específico (ex: não existe if __name__ == '__main__'),
+    // vamos assumir que os scripts Python diretamente na raiz do diretório devem ganhar um .bat
+    if entry_points.is_empty() {
+        for file in &python_files {
+            if file.parent() == Some(dir) {
+                entry_points.push(file.clone());
+            }
+        }
+    }
+    
+    // Se ainda não temos entry points e só há um único arquivo .py no projeto inteiro, usa ele
+    if entry_points.is_empty() && python_files.len() == 1 {
+        entry_points.push(python_files[0].clone());
     }
     
     entry_points
@@ -425,6 +440,8 @@ fn main() {
         target_path.as_path()
     };
 
+    let has_requirements = find_requirements_txt(project_root).is_some();
+
     // Determina as bibliotecas necessárias
     let libraries = if target_path.is_file() {
         println!("Processing Python file: {}", target_path.display());
@@ -439,6 +456,17 @@ fn main() {
         eprintln!("Invalid path type: {}", target_path.display());
         exit(1);
     };
+
+    // Cria um requirements.txt objetivo se ele não existia e temos bibliotecas
+    if !has_requirements && !libraries.is_empty() {
+        let req_path = project_root.join("requirements.txt");
+        let content = libraries.join("\n") + "\n";
+        if let Err(e) = fs::write(&req_path, content) {
+            eprintln!("Warning: Failed to create requirements.txt: {}", e);
+        } else {
+            println!("Created objective requirements.txt with {} libraries", libraries.len());
+        }
+    }
 
     // Cria venv se não existir
     if !venv_exists(venv_name) {
@@ -469,7 +497,7 @@ fn main() {
             let target_file = target_path.file_name().and_then(|s| s.to_str()).unwrap_or("");
             
             let bat_content = format!(
-                "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython {}\r\npause\r\n",
+                "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython \"{}\"\r\npause\r\n",
                 venv_name, target_file
             );
             
@@ -492,7 +520,7 @@ fn main() {
                     let target_file = ep.display();
                     
                     let bat_content = format!(
-                        "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython {}\r\npause\r\n",
+                        "@echo off\r\ncall {}\\Scripts\\activate.bat\r\npython \"{}\"\r\npause\r\n",
                         venv_name, target_file
                     );
                     
